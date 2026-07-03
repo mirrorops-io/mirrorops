@@ -1,0 +1,90 @@
+{
+  "name": "GPU Idle Shutdown Check",
+  "nodes": [
+    {
+      "parameters": {
+        "rule": {
+          "interval": [
+            {
+              "field": "minutes",
+              "minutesInterval": 5
+            }
+          ]
+        }
+      },
+      "id": "sched-trigger-01",
+      "name": "Every 5 minutes",
+      "type": "n8n-nodes-base.scheduleTrigger",
+      "typeVersion": 1.2,
+      "position": [
+        260,
+        300
+      ]
+    },
+    {
+      "parameters": {
+        "operation": "get",
+        "propertyName": "gpu_last_used",
+        "key": "gpu_last_used",
+        "keyType": "automatic",
+        "options": {}
+      },
+      "id": "redis-get-01",
+      "name": "Get gpu_last_used",
+      "type": "n8n-nodes-base.redis",
+      "typeVersion": 1,
+      "position": [
+        480,
+        300
+      ],
+      "credentials": {
+        "redis": {
+          "id": "REPLACE_WITH_YOUR_REDIS_CRED",
+          "name": "Redis account"
+        }
+      }
+    },
+    {
+      "parameters": {
+        "jsCode": "/**\n * GPU Lifecycle \u2014 Idle Shutdown Check (n8n Code node)\n *\n * Runs on a Schedule Trigger every 5 minutes. Reads the `gpu_last_used`\n * flag (set by the boot node via Redis) and powers the box OFF once it has\n * been idle longer than GPU_IDLE_MINUTES.\n *\n * Wiring: Schedule Trigger (5 min) \u2192 Redis \"Get\" (key gpu_last_used,\n * property gpu_last_used) \u2192 THIS Code node.\n *\n * Env vars:\n *   HETZNER_API_TOKEN       Hetzner Cloud API token (read+write)\n *   HETZNER_GPU_SERVER_ID   numeric server id of the GPU box\n *   GPU_IDLE_MINUTES        optional, default 15\n *\n * ponytail: fail-safe is \"leave it running\". If the flag is missing or the\n * API errors we do NOT power off \u2014 a stuck-on box costs money, a wrongly\n * killed box costs a failed job mid-flight. Cost ceiling: one extra idle\n * hour. Upgrade path: alert if idle-but-flagless persists > N cycles.\n */\n\nconst HETZNER_API = 'https://api.hetzner.cloud/v1';\nconst TOKEN = $env.HETZNER_API_TOKEN;\nconst SERVER_ID = $env.HETZNER_GPU_SERVER_ID;\nconst IDLE_MS = parseInt($env.GPU_IDLE_MINUTES || '15', 10) * 60 * 1000;\n\nconst headers = {\n  Authorization: `Bearer ${TOKEN}`,\n  'Content-Type': 'application/json',\n};\n\n// Redis \"Get\" puts the value on the incoming item as gpu_last_used\nconst raw = $json.gpu_last_used;\nconst lastUsed = raw ? parseInt(raw, 10) : null;\n\nif (!lastUsed) {\n  return [{ json: { action: 'skip', reason: 'no gpu_last_used flag' } }];\n}\n\nconst idleMs = Date.now() - lastUsed;\nif (idleMs < IDLE_MS) {\n  return [{ json: { action: 'keep', idle_minutes: Math.round(idleMs / 60000) } }];\n}\n\nconst statusRes = await fetch(`${HETZNER_API}/servers/${SERVER_ID}`, { headers });\nif (!statusRes.ok) {\n  return [{ json: { action: 'skip', reason: `status ${statusRes.status}` } }];\n}\nconst status = (await statusRes.json()).server.status;\nif (status !== 'running') {\n  return [{ json: { action: 'noop', reason: `already ${status}` } }];\n}\n\nconst off = await fetch(`${HETZNER_API}/servers/${SERVER_ID}/actions/poweroff`, {\n  method: 'POST',\n  headers,\n});\nif (!off.ok) throw new Error(`Hetzner poweroff ${off.status}`);\n\nreturn [{ json: { action: 'poweroff', idle_minutes: Math.round(idleMs / 60000) } }];\n"
+      },
+      "id": "code-shutdown-01",
+      "name": "Idle Shutdown Check",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [
+        700,
+        300
+      ]
+    }
+  ],
+  "connections": {
+    "Every 5 minutes": {
+      "main": [
+        [
+          {
+            "node": "Get gpu_last_used",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Get gpu_last_used": {
+      "main": [
+        [
+          {
+            "node": "Idle Shutdown Check",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    }
+  },
+  "active": false,
+  "settings": {
+    "executionOrder": "v1"
+  },
+  "pinData": {}
+}
